@@ -1852,6 +1852,7 @@ impl DisplayListItem {
                 | Self::PushTextShadow { .. }
                 | Self::PushImageMaskClip { .. }
                 | Self::PushOpacity { .. }
+                | Self::PushReferenceFrame { .. }
         )
     }
 
@@ -1866,6 +1867,7 @@ impl DisplayListItem {
                 | Self::PopTextShadow
                 | Self::PopImageMaskClip
                 | Self::PopOpacity
+                | Self::PopReferenceFrame
         )
     }
 
@@ -1879,6 +1881,7 @@ impl DisplayListItem {
             Self::PushTextShadow { .. } => Some(Self::PopTextShadow),
             Self::PushImageMaskClip { .. } => Some(Self::PopImageMaskClip),
             Self::PushOpacity { .. } => Some(Self::PopOpacity),
+            Self::PushReferenceFrame { .. } => Some(Self::PopReferenceFrame),
             _ => None,
         }
     }
@@ -4822,26 +4825,7 @@ where
 
         // Check if this node has a GPU-accelerated transform (CSS transform or drag).
         // If so, wrap in a reference frame so WebRender can animate it on the GPU.
-        let has_reference_frame = node.dom_node_id.and_then(|dom_id| {
-            self.gpu_value_cache.and_then(|cache| {
-                // CSS transform first, then the ANIMATION channel. An
-                // engine-driven transition animates nodes that have no CSS
-                // `transform` of their own, so without this second lookup they
-                // get no reference frame and the element jumps to its
-                // destination instead of travelling there.
-                let (key, transform) = cache
-                    .css_transform_keys
-                    .get(&dom_id)
-                    .zip(cache.css_current_transform_values.get(&dom_id))
-                    .or_else(|| {
-                        cache
-                            .anim_transform_keys
-                            .get(&dom_id)
-                            .zip(cache.anim_current_transform_values.get(&dom_id))
-                    })?;
-                Some((*key, *transform))
-            })
-        });
+        let has_reference_frame = node.dom_node_id.and_then(|dom_id| self.reference_frame_for(dom_id, node.used_size));
         // Push a stacking context for WebRender
         // Get the node's bounds for the stacking context
         let node_pos = self
@@ -5173,25 +5157,7 @@ where
                 .ok_or(LayoutError::InvalidTree)?;
 
             // Check if this child has a GPU transform (CSS transform or drag)
-            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| {
-                self.gpu_value_cache.and_then(|cache| {
-                    // CSS transform first, then the ANIMATION channel — an
-                    // engine-driven transition animates nodes that have no CSS
-                    // `transform` of their own, and without this they get no
-                    // reference frame and jump to their destination.
-                    let (key, transform) = cache
-                        .css_transform_keys
-                        .get(&dom_id)
-                        .zip(cache.css_current_transform_values.get(&dom_id))
-                        .or_else(|| {
-                            cache
-                                .anim_transform_keys
-                                .get(&dom_id)
-                                .zip(cache.anim_current_transform_values.get(&dom_id))
-                        })?;
-                    Some((*key, *transform))
-                })
-            });
+            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| self.reference_frame_for(dom_id, child_node.used_size));
 
             // Push reference frame if child has a transform
             if let Some((transform_key, initial_transform)) = child_ref_frame {
@@ -5272,25 +5238,7 @@ where
                 .ok_or(LayoutError::InvalidTree)?;
 
             // Check if this child has a GPU transform (CSS transform or drag)
-            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| {
-                self.gpu_value_cache.and_then(|cache| {
-                    // CSS transform first, then the ANIMATION channel — an
-                    // engine-driven transition animates nodes that have no CSS
-                    // `transform` of their own, and without this they get no
-                    // reference frame and jump to their destination.
-                    let (key, transform) = cache
-                        .css_transform_keys
-                        .get(&dom_id)
-                        .zip(cache.css_current_transform_values.get(&dom_id))
-                        .or_else(|| {
-                            cache
-                                .anim_transform_keys
-                                .get(&dom_id)
-                                .zip(cache.anim_current_transform_values.get(&dom_id))
-                        })?;
-                    Some((*key, *transform))
-                })
-            });
+            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| self.reference_frame_for(dom_id, child_node.used_size));
 
             // Push reference frame if child has a transform
             if let Some((transform_key, initial_transform)) = child_ref_frame {
@@ -5358,25 +5306,7 @@ where
                 .ok_or(LayoutError::InvalidTree)?;
 
             // Check if this child has a GPU transform (CSS transform or drag)
-            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| {
-                self.gpu_value_cache.and_then(|cache| {
-                    // CSS transform first, then the ANIMATION channel — an
-                    // engine-driven transition animates nodes that have no CSS
-                    // `transform` of their own, and without this they get no
-                    // reference frame and jump to their destination.
-                    let (key, transform) = cache
-                        .css_transform_keys
-                        .get(&dom_id)
-                        .zip(cache.css_current_transform_values.get(&dom_id))
-                        .or_else(|| {
-                            cache
-                                .anim_transform_keys
-                                .get(&dom_id)
-                                .zip(cache.anim_current_transform_values.get(&dom_id))
-                        })?;
-                    Some((*key, *transform))
-                })
-            });
+            let child_ref_frame = child_node.dom_node_id.and_then(|dom_id| self.reference_frame_for(dom_id, child_node.used_size));
 
             // Push reference frame if child has a transform
             if let Some((transform_key, initial_transform)) = child_ref_frame {
@@ -5550,6 +5480,45 @@ where
                 .and_then(azul_core::styled_dom::NodeHierarchyItem::parent_id);
         }
         None
+    }
+
+    /// The reference frame (CSS `transform`) a node paints inside, if any.
+    ///
+    /// With a live [`GpuValueCache`] (a window) its keys and current values win:
+    /// they are what animations and drags drive. Without one -- paged export
+    /// (PDF) -- nothing is animated and nothing synchronises a cache, so the
+    /// CSS `transform` is resolved here from the style, against the node's
+    /// own size (its percentages and `transform-origin`). An identity
+    /// transform needs no frame.
+    fn reference_frame_for(
+        &self,
+        dom_id: NodeId,
+        size: Option<LogicalSize>,
+    ) -> Option<(TransformKey, ComputedTransform3D)> {
+        if let Some(cache) = self.gpu_value_cache {
+            // CSS transform first, then the ANIMATION channel -- an
+            // engine-driven transition animates nodes that have no CSS
+            // `transform` of their own, and without this they get no
+            // reference frame and jump to their destination.
+            let (key, transform) = cache
+                .css_transform_keys
+                .get(&dom_id)
+                .zip(cache.css_current_transform_values.get(&dom_id))
+                .or_else(|| {
+                    cache
+                        .anim_transform_keys
+                        .get(&dom_id)
+                        .zip(cache.anim_current_transform_values.get(&dom_id))
+                })?;
+            return Some((*key, *transform));
+        }
+        let size = size.unwrap_or_default();
+        let transform = GpuValueCache::css_transform_of(
+            self.ctx.styled_dom,
+            dom_id,
+            (size.width, size.height),
+        )?;
+        (transform != ComputedTransform3D::IDENTITY).then(|| (TransformKey::unique(), transform))
     }
 
     fn push_image_mask_clip(&self, builder: &mut DisplayListBuilder, node_index: usize) -> bool {
@@ -10076,6 +10045,25 @@ fn paginate_pages_impl(
                     opacity: *opacity,
                     opacity_key: *opacity_key,
                 },
+                // A reference frame's bounds origin IS its transform origin, so it
+                // is shifted into page space, never clamped to the page band like a
+                // clip: clamping would move the point the element rotates about.
+                DisplayListItem::PushReferenceFrame {
+                    transform_key,
+                    initial_transform,
+                    bounds,
+                } => DisplayListItem::PushReferenceFrame {
+                    transform_key: *transform_key,
+                    initial_transform: *initial_transform,
+                    bounds: LogicalRect {
+                        origin: LogicalPosition {
+                            x: bounds.0.origin.x,
+                            y: bounds.0.origin.y - content_start_y + header_space,
+                        },
+                        size: bounds.0.size,
+                    }
+                    .into(),
+                },
                 // PushTextShadow carries only the shadow definition.
                 other => other.clone(),
             }
@@ -13777,6 +13765,51 @@ mod autotest_generated {
             .items
             .iter()
             .all(|i| !matches!(i, DisplayListItem::PushOpacity { .. } | DisplayListItem::PopOpacity)));
+    }
+
+    /// A CSS `transform` is a reference frame. Pagination keeps it as a balanced
+    /// marker pair on the pages its content reaches, with the frame's origin (the
+    /// transform origin) shifted into page space exactly -- not clamped to the
+    /// page like a clip, which would move the point the element turns about.
+    #[test]
+    fn paginate_keeps_reference_frames_balanced_with_an_exact_origin() {
+        use azul_core::{resources::TransformKey, transform::ComputedTransform3D};
+        let rr = RendererResources::default();
+        let dl = list_of(vec![
+            DisplayListItem::PushReferenceFrame {
+                transform_key: TransformKey::unique(),
+                initial_transform: ComputedTransform3D::IDENTITY,
+                bounds: rect(10.0, 120.0, 50.0, 40.0).into(),
+            },
+            DisplayListItem::Rect {
+                bounds: rect(10.0, 120.0, 50.0, 40.0).into(),
+                color: opaque(),
+                border_radius: BorderRadius::default(),
+            },
+            DisplayListItem::PopReferenceFrame,
+        ]);
+        let pages =
+            paginate_display_list_with_slicer_and_breaks(dl, &SlicerConfig::simple(100.0), &rr)
+                .expect("pagination succeeds");
+        assert_eq!(pages.len(), 2);
+        // Nothing of the element is on page 1: no stray marker either.
+        assert!(pages[0].items.iter().all(|i| !matches!(
+            i,
+            DisplayListItem::PushReferenceFrame { .. } | DisplayListItem::PopReferenceFrame
+        )));
+        let frame = pages[1].items.iter().find_map(|i| match i {
+            DisplayListItem::PushReferenceFrame { bounds, .. } => Some(bounds.0),
+            _ => None,
+        });
+        let frame = frame.expect("page 2 re-emits the frame");
+        assert_eq!((frame.origin.x, frame.origin.y), (10.0, 20.0));
+        assert_eq!((frame.size.width, frame.size.height), (50.0, 40.0));
+        let pops = pages[1]
+            .items
+            .iter()
+            .filter(|i| matches!(i, DisplayListItem::PopReferenceFrame))
+            .count();
+        assert_eq!(pops, 1);
     }
 
     // ---------------------------------------------------------------------

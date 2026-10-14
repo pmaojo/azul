@@ -261,7 +261,7 @@ impl GpuValueCache {
     /// The node's CSS `transform` as a matrix, with percentages resolved
     /// against `size` (its border box, logical px); `None` when the node
     /// has no transform.
-    fn css_transform_of(
+    pub fn css_transform_of(
         styled_dom: &StyledDom,
         node_id: NodeId,
         size: (f32, f32),
