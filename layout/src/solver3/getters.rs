@@ -1805,13 +1805,60 @@ pub fn get_style_border_radius(
     }
 }
 
+/// The computed `border-radius` of a node, clamped to its box.
+///
+/// CSS Backgrounds 3 §5.5: when the radii of two adjacent corners would
+/// overlap, every radius is scaled down by the same factor until none do. That
+/// is what makes `border-radius: 9999px` a pill/circle rather than a rounded
+/// rectangle with oversized, overlapping corners.
+#[must_use]
+pub fn get_border_radius(
+    styled_dom: &StyledDom,
+    node_id: NodeId,
+    node_state: &StyledNodeState,
+    element_size: PhysicalSizeImport,
+    viewport_size: LogicalSize,
+) -> BorderRadius {
+    let r = get_border_radius_unclamped(styled_dom, node_id, node_state, element_size, viewport_size);
+    clamp_border_radius(r, element_size.width, element_size.height)
+}
+
+/// Scale `r` down so no two adjacent corner radii overlap on a `width` x
+/// `height` box (CSS Backgrounds 3 §5.5). A box with no area keeps its radii.
+#[must_use]
+pub fn clamp_border_radius(r: BorderRadius, width: f32, height: f32) -> BorderRadius {
+    if width <= 0.0 || height <= 0.0 {
+        return r;
+    }
+    let mut f = 1.0f32;
+    for (sum, side) in [
+        (r.top_left + r.top_right, width),
+        (r.bottom_left + r.bottom_right, width),
+        (r.top_left + r.bottom_left, height),
+        (r.top_right + r.bottom_right, height),
+    ] {
+        if sum > side {
+            f = f.min(side / sum);
+        }
+    }
+    if f >= 1.0 {
+        return r;
+    }
+    BorderRadius {
+        top_left: r.top_left * f,
+        top_right: r.top_right * f,
+        bottom_left: r.bottom_left * f,
+        bottom_right: r.bottom_right * f,
+    }
+}
+
 /// Get border radius for all four corners (resolved to pixels)
 ///
 /// # Arguments
 /// * `element_size` - The element's own size (width × height) for % resolution. According to CSS
 ///   spec, border-radius % uses element's own dimensions.
 #[must_use]
-pub fn get_border_radius(
+fn get_border_radius_unclamped(
     styled_dom: &StyledDom,
     node_id: NodeId,
     node_state: &StyledNodeState,
@@ -9697,3 +9744,51 @@ mod unresolved_family_reporting_tests {
         );
     }
 }
+#[cfg(test)]
+mod border_radius_clamp_tests {
+    use super::*;
+
+    fn r(tl: f32, tr: f32, br: f32, bl: f32) -> BorderRadius {
+        BorderRadius {
+            top_left: tl,
+            top_right: tr,
+            bottom_right: br,
+            bottom_left: bl,
+        }
+    }
+
+    #[test]
+    fn radii_that_fit_are_left_alone() {
+        assert_eq!(clamp_border_radius(r(8.0, 8.0, 8.0, 8.0), 100.0, 40.0), r(8.0, 8.0, 8.0, 8.0));
+        assert_eq!(clamp_border_radius(BorderRadius::default(), 100.0, 40.0), BorderRadius::default());
+    }
+
+    #[test]
+    fn a_huge_radius_becomes_a_pill_or_a_circle() {
+        // 9999px on a 100x40 box: the height binds (40 / (9999+9999)), so every
+        // corner shrinks to half the short side: a pill.
+        let pill = clamp_border_radius(r(9999.0, 9999.0, 9999.0, 9999.0), 100.0, 40.0);
+        for c in [pill.top_left, pill.top_right, pill.bottom_right, pill.bottom_left] {
+            assert!((c - 20.0).abs() < 0.01, "corner {c}");
+        }
+        // A square becomes a circle.
+        let circle = clamp_border_radius(r(9999.0, 9999.0, 9999.0, 9999.0), 84.0, 84.0);
+        assert!((circle.top_left - 42.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn one_oversized_corner_scales_all_four_by_the_same_factor() {
+        // 60 + 20 on a 40px-wide box: f = 0.5, so every radius halves.
+        let c = clamp_border_radius(r(60.0, 20.0, 4.0, 2.0), 80.0, 40.0);
+        assert!(c.top_left <= 40.0 && c.top_left > 0.0);
+        let f = c.top_left / 60.0;
+        assert!((c.top_right - 20.0 * f).abs() < 0.001);
+        assert!((c.bottom_right - 4.0 * f).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_box_with_no_area_keeps_its_radii() {
+        assert_eq!(clamp_border_radius(r(5.0, 5.0, 5.0, 5.0), 0.0, 10.0), r(5.0, 5.0, 5.0, 5.0));
+    }
+}
+
