@@ -8851,8 +8851,8 @@ fn clip_and_offset_display_item(
             gradient,
             border_radius,
         } => {
-            if bounds.0.origin.y + bounds.0.size.height < page_top
-                || bounds.0.origin.y > page_bottom
+            if bounds.0.origin.y + bounds.0.size.height <= page_top
+                || bounds.0.origin.y >= page_bottom
             {
                 None
             } else {
@@ -8868,8 +8868,8 @@ fn clip_and_offset_display_item(
             gradient,
             border_radius,
         } => {
-            if bounds.0.origin.y + bounds.0.size.height < page_top
-                || bounds.0.origin.y > page_bottom
+            if bounds.0.origin.y + bounds.0.size.height <= page_top
+                || bounds.0.origin.y >= page_bottom
             {
                 None
             } else {
@@ -8887,8 +8887,8 @@ fn clip_and_offset_display_item(
             shadow,
             border_radius,
         } => {
-            if bounds.0.origin.y + bounds.0.size.height < page_top
-                || bounds.0.origin.y > page_bottom
+            if bounds.0.origin.y + bounds.0.size.height <= page_top
+                || bounds.0.origin.y >= page_bottom
             {
                 None
             } else {
@@ -13550,6 +13550,25 @@ mod autotest_generated {
             assert_eq!(r.origin.y, 0.0);
             assert!(r.size.height > 0.0 && r.size.height <= 100.0);
         }
+    }
+
+    /// An item that starts exactly where the page ends belongs to the NEXT page.
+    /// It used to be kept on both: shadows and gradients are not clipped to the
+    /// page, so the whole of a box that began on the next page was painted over
+    /// the bottom margin of this one (a gray block where the box's background,
+    /// which IS clipped, had correctly been dropped).
+    #[test]
+    fn items_starting_at_the_page_bottom_or_ending_at_its_top_are_not_kept() {
+        let shadow = |y: f32, h: f32| DisplayListItem::BoxShadow {
+            bounds: rect(0.0, y, 50.0, h).into(),
+            shadow: StyleBoxShadow::default(),
+            border_radius: BorderRadius::default(),
+        };
+        // Page covers y in [100, 200].
+        assert!(clip_and_offset_display_item(&shadow(200.0, 40.0), 100.0, 200.0).is_none());
+        assert!(clip_and_offset_display_item(&shadow(60.0, 40.0), 100.0, 200.0).is_none());
+        assert!(clip_and_offset_display_item(&shadow(199.0, 40.0), 100.0, 200.0).is_some());
+        assert!(clip_and_offset_display_item(&shadow(61.0, 40.0), 100.0, 200.0).is_some());
     }
 
     // ---------------------------------------------------------------------
