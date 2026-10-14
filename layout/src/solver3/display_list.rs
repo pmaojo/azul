@@ -13887,6 +13887,8 @@ mod autotest_generated {
         let sized = ImageRef::null_image(10, 5, RawImageFormat::RGBA8, b"a.png".to_vec());
         let size = intrinsic_image_size(&sized, &cache);
         assert_eq!((size.width, size.height), (10.0, 5.0));
+    }
+
     /// An item that starts exactly where the page ends belongs to the NEXT page.
     /// It used to be kept on both: shadows and gradients are not clipped to the
     /// page, so the whole of a box that began on the next page was painted over
