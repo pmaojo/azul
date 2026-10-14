@@ -5485,11 +5485,17 @@ where
                 // in one rect - so the tiling is resolved HERE, into a single
                 // non-repeating mask that covers the paint rect. Every backend
                 // then needs no notion of repeat at all.
+                // (`tile_mask` needs the CPU raster stack; without `cpurender` the
+                // mask is drawn once, unrepeated - the same fallback as when the
+                // tile sheet can't be built.)
+                #[cfg(feature = "cpurender")]
                 let (image, mask_rect) = match clip_mask.repeat {
                     true => tile_mask(&clip_mask.image, mask_rect, paint_rect)
                         .unwrap_or_else(|| (clip_mask.image.clone(), mask_rect)),
                     false => (clip_mask.image.clone(), mask_rect),
                 };
+                #[cfg(not(feature = "cpurender"))]
+                let (image, mask_rect) = (clip_mask.image.clone(), mask_rect);
                 builder.push_image_mask_clip(paint_rect, image, mask_rect);
                 true
             }
@@ -11060,6 +11066,7 @@ fn mask_pixels_r8(mask: &ImageRef) -> Option<(Vec<u8>, usize, usize)> {
     Some((out, w, h))
 }
 
+#[cfg(feature = "cpurender")]
 fn rasterize_svg_clip_to_r8(
     svg_clip: &azul_core::svg::SvgMultiPolygon,
     paint_rect: &LogicalRect,
