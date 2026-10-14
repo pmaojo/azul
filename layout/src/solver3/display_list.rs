@@ -40,6 +40,7 @@ use azul_css::{
             background::{ConicGradient, ExtendMode, LinearGradient, RadialGradient},
             border_radius::StyleBorderRadius,
             box_shadow::{BoxShadowClipMode, StyleBoxShadow},
+            effects::{StyleObjectFit, StyleObjectPosition},
             filter::{StyleFilter, StyleFilterVec},
             BorderStyle, LayoutBorderBottomWidth, LayoutBorderLeftWidth, LayoutBorderRightWidth,
             LayoutBorderTopWidth, StyleBorderBottomColor, StyleBorderBottomStyle,
@@ -63,11 +64,11 @@ use crate::{
     solver3::{
         getters::{
             get_background_color, get_background_contents, get_border_info, get_border_radius,
-            get_break_after, get_break_before, get_caret_style, get_overflow_clip_margin_property,
-            get_overflow_x, get_overflow_y, get_scrollbar_gutter_property,
+            get_break_after, get_break_before, get_caret_style, get_object_fit_property,
+            get_object_position_property, get_overflow_clip_margin_property, get_overflow_x, get_overflow_y, get_scrollbar_gutter_property,
             get_scrollbar_info_from_layout, get_scrollbar_style, get_selection_style,
             get_style_border_radius, get_visibility, get_z_index, is_forced_page_break, BorderInfo,
-            CaretStyle, ComputedScrollbarStyle, SelectionStyle,
+            CaretStyle, ComputedScrollbarStyle, MultiValue, SelectionStyle,
         },
         layout_tree::{LayoutNode, LayoutNodeHot, LayoutNodeId, LayoutNodeWarm, LayoutTree},
         positioning::get_position_type,
@@ -3368,6 +3369,75 @@ impl DisplayListBuilder {
             border_radius,
         });
     }
+
+    /// Paint `image` inside `bounds` honoring `object-fit` / `object-position`.
+    ///
+    /// `Fill` (the default, and what every image did before) stretches the
+    /// image over `bounds`. The other fits size the image from its intrinsic
+    /// size and position it within `bounds`; whatever overhangs is cut off by
+    /// a clip on `bounds`, which is a structure marker like any other clip, so
+    /// pagination keeps it balanced.
+    pub(crate) fn push_image_fitted(
+        &mut self,
+        bounds: LogicalRect,
+        image: ImageRef,
+        border_radius: BorderRadius,
+        fit: StyleObjectFit,
+        position: StyleObjectPosition,
+    ) {
+        let intrinsic = image.get_size();
+        match object_fit_rect(fit, intrinsic, bounds, &position) {
+            Some(fitted) => {
+                self.push_clip(bounds, border_radius);
+                self.push_image(fitted, image, BorderRadius::default());
+                self.pop_clip();
+            }
+            None => self.push_image(bounds, image, border_radius),
+        }
+    }
+}
+
+/// Where an image of `intrinsic` size lands inside `bounds` for `fit` and
+/// `position` (CSS Images 3 §5.5). `None` means "fill `bounds`" -- `Fill`,
+/// or a degenerate size where scaling is undefined.
+fn object_fit_rect(
+    fit: StyleObjectFit,
+    intrinsic: LogicalSize,
+    bounds: LogicalRect,
+    position: &StyleObjectPosition,
+) -> Option<LogicalRect> {
+    use azul_css::props::style::background::{BackgroundPositionHorizontal, BackgroundPositionVertical};
+    let (iw, ih) = (intrinsic.width, intrinsic.height);
+    let (bw, bh) = (bounds.size.width, bounds.size.height);
+    if iw <= 0.0 || ih <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    let contain = (bw / iw).min(bh / ih);
+    let scale = match fit {
+        StyleObjectFit::Fill => return None,
+        StyleObjectFit::Contain => contain,
+        StyleObjectFit::Cover => (bw / iw).max(bh / ih),
+        StyleObjectFit::None => 1.0,
+        StyleObjectFit::ScaleDown => contain.min(1.0),
+    };
+    let (w, h) = (iw * scale, ih * scale);
+    let (free_x, free_y) = (bw - w, bh - h);
+    let dx = match position.horizontal {
+        BackgroundPositionHorizontal::Left => 0.0,
+        BackgroundPositionHorizontal::Center => free_x * 0.5,
+        BackgroundPositionHorizontal::Right => free_x,
+        BackgroundPositionHorizontal::Exact(v) => v.to_pixels_internal(free_x, 16.0, 16.0),
+    };
+    let dy = match position.vertical {
+        BackgroundPositionVertical::Top => 0.0,
+        BackgroundPositionVertical::Center => free_y * 0.5,
+        BackgroundPositionVertical::Bottom => free_y,
+        BackgroundPositionVertical::Exact(v) => v.to_pixels_internal(free_y, 16.0, 16.0),
+    };
+    Some(LogicalRect::new(
+        LogicalPosition::new(bounds.origin.x + dx, bounds.origin.y + dy),
+        LogicalSize::new(w, h),
+    ))
 }
 
 /// Main entry point for generating the display list.
@@ -6878,8 +6948,18 @@ where
                         element_size,
                         self.ctx.viewport_size,
                     );
+                    // `object-fit` / `object-position` decide how the image sits in its box.
+                    let fit = match get_object_fit_property(self.ctx.styled_dom, dom_id, &styled_node_state) {
+                        MultiValue::Exact(f) => f,
+                        _ => StyleObjectFit::default(),
+                    };
+                    let position =
+                        match get_object_position_property(self.ctx.styled_dom, dom_id, &styled_node_state) {
+                            MultiValue::Exact(p) => p,
+                            _ => StyleObjectPosition::default(),
+                        };
                     // Store the ImageRef directly in the display list
-                    builder.push_image(paint_rect, image_ref, border_radius);
+                    builder.push_image_fitted(paint_rect, image_ref, border_radius, fit, position);
                 }
             }
         }
@@ -8168,7 +8248,23 @@ where
                     {
                         let prev_node = builder.current_node();
                         builder.set_current_node(Some(*image_node));
-                        builder.push_image(object_bounds, image_ref, BorderRadius::default());
+                        let state = self.get_styled_node_state(*image_node);
+                        let fit = match get_object_fit_property(self.ctx.styled_dom, *image_node, &state) {
+                            MultiValue::Exact(f) => f,
+                            _ => StyleObjectFit::default(),
+                        };
+                        let position =
+                            match get_object_position_property(self.ctx.styled_dom, *image_node, &state) {
+                                MultiValue::Exact(p) => p,
+                                _ => StyleObjectPosition::default(),
+                            };
+                        builder.push_image_fitted(
+                            object_bounds,
+                            image_ref,
+                            BorderRadius::default(),
+                            fit,
+                            position,
+                        );
                         builder.set_current_node(prev_node);
                     }
                 } else if let Some(image_ref) = get_image_ref_for_image_source(
@@ -13641,6 +13737,95 @@ mod autotest_generated {
             .items
             .iter()
             .all(|i| !matches!(i, DisplayListItem::PushOpacity { .. } | DisplayListItem::PopOpacity)));
+    }
+
+    // ---------------------------------------------------------------------
+    // object-fit / object-position
+    // ---------------------------------------------------------------------
+
+    fn fit_in(
+        fit: StyleObjectFit,
+        image: (f32, f32),
+        bounds: (f32, f32),
+        position: StyleObjectPosition,
+    ) -> Option<(f32, f32, f32, f32)> {
+        object_fit_rect(
+            fit,
+            LogicalSize::new(image.0, image.1),
+            rect(10.0, 20.0, bounds.0, bounds.1),
+            &position,
+        )
+        .map(|r| (r.origin.x, r.origin.y, r.size.width, r.size.height))
+    }
+
+    #[test]
+    fn object_fit_fill_stretches_and_degenerate_sizes_fall_back_to_fill() {
+        let c = StyleObjectPosition::default();
+        assert_eq!(fit_in(StyleObjectFit::Fill, (80.0, 40.0), (100.0, 100.0), c), None);
+        assert_eq!(fit_in(StyleObjectFit::Cover, (0.0, 40.0), (100.0, 100.0), c), None);
+        assert_eq!(fit_in(StyleObjectFit::Cover, (80.0, 40.0), (0.0, 100.0), c), None);
+    }
+
+    #[test]
+    fn object_fit_cover_scales_to_the_larger_ratio_and_centers_the_overflow() {
+        let c = StyleObjectPosition::default();
+        // 80x40 into 100x100: scale 2.5 -> 200x100, 50px cut off each side.
+        assert_eq!(
+            fit_in(StyleObjectFit::Cover, (80.0, 40.0), (100.0, 100.0), c),
+            Some((10.0 - 50.0, 20.0, 200.0, 100.0))
+        );
+    }
+
+    #[test]
+    fn object_fit_contain_scales_to_the_smaller_ratio_and_centers_the_letterbox() {
+        let c = StyleObjectPosition::default();
+        // scale 1.25 -> 100x50, 25px of bar above and below.
+        assert_eq!(
+            fit_in(StyleObjectFit::Contain, (80.0, 40.0), (100.0, 100.0), c),
+            Some((10.0, 20.0 + 25.0, 100.0, 50.0))
+        );
+    }
+
+    #[test]
+    fn object_fit_none_keeps_the_intrinsic_size_and_scale_down_never_enlarges() {
+        let c = StyleObjectPosition::default();
+        assert_eq!(
+            fit_in(StyleObjectFit::None, (80.0, 40.0), (100.0, 100.0), c),
+            Some((10.0 + 10.0, 20.0 + 30.0, 80.0, 40.0))
+        );
+        // Smaller than the box: scale-down behaves like `none`...
+        assert_eq!(
+            fit_in(StyleObjectFit::ScaleDown, (80.0, 40.0), (100.0, 100.0), c),
+            Some((10.0 + 10.0, 20.0 + 30.0, 80.0, 40.0))
+        );
+        // ...larger than the box: like `contain`.
+        assert_eq!(
+            fit_in(StyleObjectFit::ScaleDown, (200.0, 100.0), (100.0, 100.0), c),
+            Some((10.0, 20.0 + 25.0, 100.0, 50.0))
+        );
+    }
+
+    #[test]
+    fn object_position_moves_the_fitted_image_within_the_box() {
+        use azul_css::props::style::background::{
+            BackgroundPositionHorizontal as H, BackgroundPositionVertical as V,
+        };
+        let left_top = StyleObjectPosition {
+            horizontal: H::Left,
+            vertical: V::Top,
+        };
+        assert_eq!(
+            fit_in(StyleObjectFit::Cover, (80.0, 40.0), (100.0, 100.0), left_top),
+            Some((10.0, 20.0, 200.0, 100.0))
+        );
+        let right_bottom = StyleObjectPosition {
+            horizontal: H::Right,
+            vertical: V::Bottom,
+        };
+        assert_eq!(
+            fit_in(StyleObjectFit::Cover, (80.0, 40.0), (100.0, 100.0), right_bottom),
+            Some((10.0 - 100.0, 20.0, 200.0, 100.0))
+        );
     }
 
     // ---------------------------------------------------------------------
