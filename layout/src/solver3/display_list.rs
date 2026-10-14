@@ -1850,6 +1850,7 @@ impl DisplayListItem {
                 | Self::PushStackingContext { .. }
                 | Self::PushTextShadow { .. }
                 | Self::PushImageMaskClip { .. }
+                | Self::PushOpacity { .. }
         )
     }
 
@@ -1863,6 +1864,7 @@ impl DisplayListItem {
                 | Self::PopStackingContext
                 | Self::PopTextShadow
                 | Self::PopImageMaskClip
+                | Self::PopOpacity
         )
     }
 
@@ -1875,6 +1877,7 @@ impl DisplayListItem {
             Self::PushStackingContext { .. } => Some(Self::PopStackingContext),
             Self::PushTextShadow { .. } => Some(Self::PopTextShadow),
             Self::PushImageMaskClip { .. } => Some(Self::PopImageMaskClip),
+            Self::PushOpacity { .. } => Some(Self::PopOpacity),
             _ => None,
         }
     }
@@ -9922,6 +9925,15 @@ fn paginate_pages_impl(
                     mask_image: mask_image.clone(),
                     mask_rect: rebase_band(mask_rect.0).into(),
                 },
+                DisplayListItem::PushOpacity {
+                    bounds,
+                    opacity,
+                    opacity_key,
+                } => DisplayListItem::PushOpacity {
+                    bounds: rebase_band(bounds.0).into(),
+                    opacity: *opacity,
+                    opacity_key: *opacity_key,
+                },
                 // PushTextShadow carries only the shadow definition.
                 other => other.clone(),
             }
@@ -13550,6 +13562,78 @@ mod autotest_generated {
             assert_eq!(r.origin.y, 0.0);
             assert!(r.size.height > 0.0 && r.size.height <= 100.0);
         }
+    }
+
+    /// `opacity` wraps content in `PushOpacity`/`PopOpacity`. Pagination used
+    /// to drop both, so on a paged export (PDF) the content was drawn fully
+    /// opaque. They are structure markers like clips: re-emitted on every page
+    /// the wrapped content reaches, and always balanced.
+    #[test]
+    fn paginate_keeps_opacity_markers_balanced_on_every_page() {
+        let rr = RendererResources::default();
+        let dl = list_of(vec![
+            DisplayListItem::PushOpacity {
+                bounds: rect(0.0, 0.0, 10.0, 250.0).into(),
+                opacity: 0.5,
+                opacity_key: None,
+            },
+            DisplayListItem::Rect {
+                bounds: rect(0.0, 0.0, 10.0, 250.0).into(),
+                color: opaque(),
+                border_radius: BorderRadius::default(),
+            },
+            DisplayListItem::PopOpacity,
+        ]);
+        let pages =
+            paginate_display_list_with_slicer_and_breaks(dl, &SlicerConfig::simple(100.0), &rr)
+                .expect("pagination succeeds");
+        assert_eq!(pages.len(), 3);
+        for page in &pages {
+            let pushes = page
+                .items
+                .iter()
+                .filter(|i| matches!(i, DisplayListItem::PushOpacity { opacity, .. } if *opacity == 0.5))
+                .count();
+            let pops = page
+                .items
+                .iter()
+                .filter(|i| matches!(i, DisplayListItem::PopOpacity))
+                .count();
+            assert_eq!((pushes, pops), (1, 1), "opacity must wrap the page's slice");
+            let first = page.items.first();
+            assert!(matches!(first, Some(DisplayListItem::PushOpacity { .. })));
+        }
+    }
+
+    #[test]
+    fn paginate_omits_opacity_markers_from_pages_without_their_content() {
+        let rr = RendererResources::default();
+        let dl = list_of(vec![
+            DisplayListItem::PushOpacity {
+                bounds: rect(0.0, 0.0, 10.0, 50.0).into(),
+                opacity: 0.5,
+                opacity_key: None,
+            },
+            DisplayListItem::Rect {
+                bounds: rect(0.0, 0.0, 10.0, 50.0).into(),
+                color: opaque(),
+                border_radius: BorderRadius::default(),
+            },
+            DisplayListItem::PopOpacity,
+            DisplayListItem::Rect {
+                bounds: rect(0.0, 150.0, 10.0, 20.0).into(),
+                color: opaque(),
+                border_radius: BorderRadius::default(),
+            },
+        ]);
+        let pages =
+            paginate_display_list_with_slicer_and_breaks(dl, &SlicerConfig::simple(100.0), &rr)
+                .expect("pagination succeeds");
+        assert_eq!(pages.len(), 2);
+        assert!(pages[1]
+            .items
+            .iter()
+            .all(|i| !matches!(i, DisplayListItem::PushOpacity { .. } | DisplayListItem::PopOpacity)));
     }
 
     // ---------------------------------------------------------------------
