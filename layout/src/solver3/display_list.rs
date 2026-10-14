@@ -6085,6 +6085,11 @@ where
             // per-side). Routed through `super::getters::*` so the compact-cache
             // has_box_shadow fast path fires — most nodes have no shadow and skip 4
             // cascade walks.
+            //
+            // The CSS `box-shadow` shorthand stores the SAME shadow on all four sides, so
+            // push each distinct shadow once. Pushing it per side painted a plain
+            // `box-shadow` four times over, which made it four times too dark.
+            let mut pushed: Vec<StyleBoxShadow> = Vec::with_capacity(4);
             for shadow in [
                 super::getters::get_box_shadow_left(self.ctx.styled_dom, dom_id, node_state),
                 super::getters::get_box_shadow_right(self.ctx.styled_dom, dom_id, node_state),
@@ -6094,6 +6099,10 @@ where
             .into_iter()
             .flatten()
             {
+                if pushed.contains(&shadow) {
+                    continue;
+                }
+                pushed.push(shadow);
                 builder.push_item(DisplayListItem::BoxShadow {
                     bounds: paint_rect.into(),
                     shadow,
