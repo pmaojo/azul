@@ -3379,10 +3379,10 @@ impl DisplayListBuilder {
         bounds: LogicalRect,
         image: ImageRef,
         border_radius: BorderRadius,
+        intrinsic: LogicalSize,
         fit: StyleObjectFit,
         position: StyleObjectPosition,
     ) {
-        let intrinsic = image.get_size();
         match object_fit_rect(fit, intrinsic, bounds, &position) {
             Some(fitted) => {
                 self.push_clip(bounds, border_radius);
@@ -3392,6 +3392,27 @@ impl DisplayListBuilder {
             None => self.push_image(bounds, image, border_radius),
         }
     }
+}
+
+/// The size an image has before any CSS sizing.
+///
+/// An `<img>` handed over as a tagged `NullImage` placeholder (a renderer that
+/// embeds the pixels itself, like printpdf) has no size of its own; the real
+/// one may be registered in the `ImageCache` under the placeholder's tag (the
+/// `src`). Without a size there is no aspect ratio to fit.
+fn intrinsic_image_size(image: &ImageRef, cache: &azul_core::resources::ImageCache) -> LogicalSize {
+    let own = image.get_size();
+    if own.width > 0.0 && own.height > 0.0 {
+        return own;
+    }
+    if let azul_core::resources::DecodedImage::NullImage { tag, .. } = image.get_data() {
+        if let Ok(key) = core::str::from_utf8(tag) {
+            if let Some(registered) = cache.get_css_image_id(&key.into()) {
+                return registered.get_size();
+            }
+        }
+    }
+    own
 }
 
 /// Where an image of `intrinsic` size lands inside `bounds` for `fit` and
@@ -6950,7 +6971,15 @@ where
                             _ => StyleObjectPosition::default(),
                         };
                     // Store the ImageRef directly in the display list
-                    builder.push_image_fitted(paint_rect, image_ref, border_radius, fit, position);
+                    let intrinsic = intrinsic_image_size(&image_ref, self.ctx.image_cache);
+                    builder.push_image_fitted(
+                        paint_rect,
+                        image_ref,
+                        border_radius,
+                        intrinsic,
+                        fit,
+                        position,
+                    );
                 }
             }
         }
@@ -8249,10 +8278,12 @@ where
                                 MultiValue::Exact(p) => p,
                                 _ => StyleObjectPosition::default(),
                             };
+                        let intrinsic = intrinsic_image_size(&image_ref, self.ctx.image_cache);
                         builder.push_image_fitted(
                             object_bounds,
                             image_ref,
                             BorderRadius::default(),
+                            intrinsic,
                             fit,
                             position,
                         );
@@ -13735,6 +13766,27 @@ mod autotest_generated {
             fit_in(StyleObjectFit::Cover, (80.0, 40.0), (100.0, 100.0), right_bottom),
             Some((10.0 - 100.0, 20.0, 200.0, 100.0))
         );
+    }
+
+    #[test]
+    fn intrinsic_image_size_uses_the_cache_for_a_tagged_placeholder() {
+        use azul_core::resources::{ImageCache, ImageRef, RawImageFormat};
+        let placeholder =
+            ImageRef::null_image(0, 0, RawImageFormat::RGBA8, b"a.png".to_vec());
+        let real = ImageRef::null_image(80, 40, RawImageFormat::RGBA8, b"a.png".to_vec());
+        let mut cache = ImageCache::new();
+        cache.add_css_image_id("a.png".into(), real);
+
+        let size = intrinsic_image_size(&placeholder, &cache);
+        assert_eq!((size.width, size.height), (80.0, 40.0));
+        // An unregistered tag stays unknown (0x0), so the caller falls back to fill.
+        let other = ImageRef::null_image(0, 0, RawImageFormat::RGBA8, b"b.png".to_vec());
+        let size = intrinsic_image_size(&other, &cache);
+        assert_eq!((size.width, size.height), (0.0, 0.0));
+        // An image that knows its own size never consults the cache.
+        let sized = ImageRef::null_image(10, 5, RawImageFormat::RGBA8, b"a.png".to_vec());
+        let size = intrinsic_image_size(&sized, &cache);
+        assert_eq!((size.width, size.height), (10.0, 5.0));
     }
 
     // ---------------------------------------------------------------------
