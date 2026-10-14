@@ -968,6 +968,41 @@ fn dense_expansion_reproduces_the_sparse_items_exactly() {
     }
 }
 
+/// A run shifted off the line's baseline (`vertical-align: super`/`sub`) has
+/// its own solved y. The dense expansion rebuilt every item's y from the
+/// line's baseline and run ascents, which silently put the shifted run back
+/// on the baseline -- invisible in the sparse layout, but the PDF export
+/// expands the dense form, so superscripts and subscripts never moved.
+#[test]
+fn dense_expansion_keeps_a_vertically_shifted_run_where_it_was_solved() {
+    use azul_layout::text3::cache::VerticalAlign;
+    let font_ref = test_font_ref();
+    for align in [VerticalAlign::Super, VerticalAlign::Sub] {
+        let content = vec![
+            styled("base ", &font_ref, 0, None, |_| {}),
+            styled("shifted", &font_ref, 5, None, move |s| s.vertical_align = align),
+            styled(" tail", &font_ref, 12, None, |_| {}),
+        ];
+        let (layout, content, _) = layout_of_content(content, &font_ref, 600.0);
+        let ys: Vec<f32> = layout.items.iter().map(|i| i.position.y).collect();
+        assert!(
+            ys.iter().any(|y| (y - ys[0]).abs() > 0.5),
+            "fixture: the sparse layout must actually shift a run ({align:?}): {ys:?}"
+        );
+        let dense = DenseText::from_unified_with_content(&layout, &content);
+        let expanded = dense.to_unified_items();
+        assert_eq!(expanded.len(), layout.items.len());
+        for (i, (e, o)) in expanded.iter().zip(layout.items.iter()).enumerate() {
+            assert_eq!(e, o, "expansion diverges at item {i} ({align:?})");
+        }
+        // positioned_cluster is the same reconstruction and must agree.
+        for (i, o) in layout.items.iter().enumerate() {
+            let (_, y, _) = dense.positioned_cluster(i as u32).expect("cluster");
+            assert!((y - o.position.y).abs() < 0.001, "positioned_cluster y at {i} ({align:?})");
+        }
+    }
+}
+
 /// (#25b) The item-index DUAL-MODE law: a layout whose clusters all
 /// carry one CONSTANT `item_index` (the shape produced by paths that
 /// never restamp per cluster) must build the SAME number of dense runs

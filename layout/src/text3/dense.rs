@@ -710,6 +710,31 @@ impl DenseText {
         self.runs.get(idx).filter(|r| r.clusters.contains(&ci))
     }
 
+    /// The top of an item in `run` on `line`, whose first item is in
+    /// `first_run`.
+    ///
+    /// Reconstructed from the line's recorded first-item top, baseline-aligned
+    /// across mixed-size runs via the run ascents. That reproduces the solved
+    /// position only while every run sits on the line's baseline. An item
+    /// shifted off it -- `vertical-align: super`/`sub`/a length, which
+    /// text3 applies per run -- has its own solved `y`, which the run
+    /// already carries (the builder splits runs where it changes). So when the
+    /// reconstruction and the run's own `y` disagree, the run's `y` wins;
+    /// where they agree the reconstructed value is kept bit-exactly.
+    fn item_top_y(line: &LineRecord, first_run: &DenseRun, run: &DenseRun) -> f32 {
+        let derived = if core::ptr::eq(first_run, run) {
+            line.baseline_y
+        } else {
+            line.baseline_y + Self::resolved_run_ascent(first_run)
+                - Self::resolved_run_ascent(run)
+        };
+        if (run.y - derived).abs() > 0.001 {
+            run.y
+        } else {
+            derived
+        }
+    }
+
     /// (d6g, y-semantics fixed in d6h) The sparse `PositionedItem`
     /// fields for cluster `i`: `(x, y, line_index)`. `y` is the ITEM's
     /// top — the line record's recorded first-item top, baseline-aligned
@@ -729,13 +754,7 @@ impl DenseText {
         }
         let first_run = self.run_of(line.clusters.0)?;
         let my_run = self.run_of(i)?;
-        // Same run ⟹ bit-exact recorded value (no float round-trip).
-        let y = if core::ptr::eq(first_run, my_run) {
-            line.baseline_y
-        } else {
-            line.baseline_y + Self::resolved_run_ascent(first_run)
-                - Self::resolved_run_ascent(my_run)
-        };
+        let y = Self::item_top_y(line, first_run, my_run);
         Some((c.x, y, line.source_index as usize))
     }
 
@@ -845,11 +864,8 @@ impl DenseText {
                         // baseline-align via run ascents. Same run ⟹
                         // the recorded value bit-exactly.
                         y: match self.run_of(line.clusters.0) {
-                            Some(fr) if !core::ptr::eq(fr, run) => {
-                                line.baseline_y + Self::resolved_run_ascent(fr)
-                                    - Self::resolved_run_ascent(run)
-                            }
-                            _ => line.baseline_y,
+                            Some(fr) => Self::item_top_y(line, fr, run),
+                            None => line.baseline_y,
                         },
                     },
                     line_index: line.source_index as usize,
