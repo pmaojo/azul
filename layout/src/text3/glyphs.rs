@@ -47,6 +47,10 @@ pub struct SimpleGlyphRun {
     pub is_ime_preview: bool,
     /// The source DOM node that generated this text run (for hit-testing)
     pub source_node_id: Option<NodeId>,
+    /// Absolute pen position after the run's last glyph advance. Glyph
+    /// instances only carry their origin, so text decorations (underline,
+    /// strikethrough) need this to cover the final glyph.
+    pub end_x: f32,
 }
 
 /// #25: the STORED form of a paint run's glyphs — 8 B/glyph instead of the
@@ -177,6 +181,7 @@ pub struct CompactGlyphRun {
     pub text_decoration: crate::text3::cache::TextDecoration,
     pub is_ime_preview: bool,
     pub source_node_id: Option<NodeId>,
+    pub end_x: f32,
 }
 
 impl From<SimpleGlyphRun> for CompactGlyphRun {
@@ -192,6 +197,7 @@ impl From<SimpleGlyphRun> for CompactGlyphRun {
             text_decoration: r.text_decoration,
             is_ime_preview: r.is_ime_preview,
             source_node_id: r.source_node_id,
+            end_x: r.end_x,
         }
     }
 }
@@ -212,6 +218,7 @@ impl CompactGlyphRun {
             text_decoration: self.text_decoration,
             is_ime_preview: self.is_ime_preview,
             source_node_id: self.source_node_id,
+            end_x: self.end_x,
         }
     }
 }
@@ -318,6 +325,7 @@ pub fn get_glyph_runs_simple(layout: &UnifiedLayout) -> Vec<SimpleGlyphRun> {
                                 text_decoration,
                                 is_ime_preview: false,
                                 source_node_id,
+                                end_x: pen_x,
                             });
                         }
                     } else {
@@ -333,10 +341,14 @@ pub fn get_glyph_runs_simple(layout: &UnifiedLayout) -> Vec<SimpleGlyphRun> {
                             text_decoration,
                             is_ime_preview: false,
                             source_node_id,
+                            end_x: pen_x,
                         });
                     }
 
                     pen_x += glyph.advance + glyph.kerning;
+                    if let Some(run) = current_run.as_mut() {
+                        run.end_x = pen_x;
+                    }
                 }
             };
 

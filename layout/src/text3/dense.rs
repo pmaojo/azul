@@ -1399,12 +1399,12 @@ pub fn get_glyph_runs_simple_dense(dense: &DenseText) -> Vec<SimpleGlyphRun> {
                 text_decoration: style.text_decoration,
                 is_ime_preview: false,
                 source_node_id,
+                end_x: c.x,
             });
         }
-        let out = &mut current_run
-            .as_mut()
-            .expect("opened above when absent")
-            .glyphs;
+        let open_run = current_run.as_mut().expect("opened above when absent");
+        open_run.end_x = c.x + c.advance;
+        let out = &mut open_run.glyphs;
 
         match detail {
             Some(d) => {

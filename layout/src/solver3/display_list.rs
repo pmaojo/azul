@@ -8103,7 +8103,10 @@ where
                     (glyph_run.glyphs.first(), glyph_run.glyphs.last())
                 {
                     let decoration_start_x = container_rect.origin.x + first_glyph.point.x;
-                    let decoration_end_x = container_rect.origin.x + last_glyph.point.x;
+                    // `end_x` is the pen position after the last glyph's advance;
+                    // the glyph origin alone would leave the final letter bare.
+                    let decoration_end_x = container_rect.origin.x
+                        + glyph_run.end_x.max(last_glyph.point.x);
                     let decoration_width = decoration_end_x - decoration_start_x;
 
                     // Use font metrics to determine decoration positions
