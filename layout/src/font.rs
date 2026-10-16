@@ -189,6 +189,130 @@ pub mod parsed {
         })
     }
 
+    /// A face's style as rust-fontconfig's `FcParseFontBytes` derives it --
+    /// `(weight, italic, oblique, width class)`, with `weight` the OS/2
+    /// `usWeightClass` or, without OS/2, 700/400 from the `head` bold bit --
+    /// read from the `head`, `OS/2` and `name` tables alone.
+    ///
+    /// `FcParseFontBytes` copies the whole font and builds its cmap coverage
+    /// and metadata only for the caller to keep these four values; every font
+    /// registration paid that (6.5 % of a 100-photo catalog render in pdfcn).
+    /// `None` exactly when that function would yield no face (or for a font
+    /// collection, which it reads face by face): callers fall back to it.
+    #[must_use]
+    pub fn read_face_style(bytes: &[u8]) -> Option<(u16, bool, bool, u16)> {
+        use allsorts::{
+            get_name::fontcode_get_name,
+            tables::{
+                os2::{FsSelectionFlag, Os2},
+                HeadTable, NameTable,
+            },
+        };
+        const FAMILY: u16 = 1;
+        const FULL_NAME: u16 = 4;
+        if bytes.starts_with(b"ttcf") {
+            return None;
+        }
+        let font_file = ReadScope::new(bytes).read::<FontData<'_>>().ok()?;
+        let provider = font_file.table_provider(0).ok()?;
+        let head_data = provider.table_data(tag::HEAD).ok()??;
+        let head = ReadScope::new(&head_data).read::<HeadTable>().ok()?;
+        // Read but not used: a face without `post` is not a face to
+        // rust-fontconfig.
+        provider.table_data(tag::POST).ok()??;
+        let os2_data = provider.table_data(tag::OS_2).ok().flatten();
+        let os2 = os2_data
+            .as_deref()
+            .and_then(|data| ReadScope::new(data).read_dep::<Os2>(data.len()).ok());
+        let name_data = provider.table_data(tag::NAME).ok()??;
+        let names = ReadScope::new(&name_data).read::<NameTable<'_>>().ok()?;
+        // rust-fontconfig makes a pattern for a full-name record that follows
+        // a family record whose name reads, if the full name is not empty.
+        let mut family = false;
+        let named = names
+            .name_records
+            .iter()
+            .any(|record| match record.name_id {
+                FAMILY => {
+                    family |= matches!(fontcode_get_name(&name_data, FAMILY), Ok(Some(_)));
+                    false
+                }
+                FULL_NAME => {
+                    family
+                        && matches!(
+                            fontcode_get_name(&name_data, FULL_NAME),
+                            Ok(Some(name)) if !name.to_bytes().is_empty()
+                        )
+                }
+                _ => false,
+            });
+        if !named {
+            return None;
+        }
+        let weight = os2
+            .as_ref()
+            .map_or(if head.is_bold() { 700 } else { 400 }, |os2| {
+                os2.us_weight_class
+            });
+        let oblique = os2
+            .as_ref()
+            .is_some_and(|os2| os2.fs_selection.contains(FsSelectionFlag::OBLIQUE));
+        let width = os2.as_ref().map_or(5, |os2| os2.us_width_class);
+        Some((weight, head.is_italic(), oblique, width))
+    }
+
+    #[cfg(test)]
+    mod face_style_tests {
+        /// Every font in this repository (and the system's, when there are
+        /// any) reads as rust-fontconfig reads it.
+        #[test]
+        fn read_face_style_matches_rust_fontconfig() {
+            use rust_fontconfig::{FcStretch, FcWeight, PatternMatch};
+            let mut fonts = Vec::new();
+            let mut dirs = vec![
+                std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/..")),
+                std::path::PathBuf::from("/usr/share/fonts"),
+            ];
+            while let Some(dir) = dirs.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if path.is_dir() {
+                        if !name.starts_with('.') && name != "target" {
+                            dirs.push(path);
+                        }
+                    } else if name.ends_with(".ttf") || name.ends_with(".otf") {
+                        fonts.push(path);
+                    }
+                }
+            }
+            assert!(!fonts.is_empty());
+            for path in fonts {
+                let bytes = std::fs::read(&path).unwrap();
+                let slow = rust_fontconfig::FcParseFontBytes(&bytes, "x")
+                    .and_then(|faces| faces.into_iter().next())
+                    .map(|(p, _)| {
+                        (
+                            p.weight,
+                            p.italic == PatternMatch::True,
+                            p.oblique == PatternMatch::True,
+                            p.stretch,
+                        )
+                    });
+                let fast = super::read_face_style(&bytes)
+                    .map(|(w, i, o, s)| (FcWeight::from_u16(w), i, o, FcStretch::from_u16(s)));
+                if bytes.starts_with(b"ttcf") {
+                    assert!(fast.is_none());
+                } else {
+                    assert_eq!(fast, slow, "{}", path.display());
+                }
+            }
+        }
+    }
+
     /// Bake a self-contained STATIC instance of a variable font at `wght`.
     ///
     /// All other axes are left at their default. Returns fresh TTF bytes that
