@@ -1218,6 +1218,15 @@ impl Default for FaceStyle {
 /// `head` italic bit). Falls back to upright Normal when the font can't be
 /// parsed, so registration never fails on a malformed face.
 fn parse_face_style(bytes: &[u8], family: &str) -> FaceStyle {
+    if let Some((weight, italic, oblique, width)) = crate::font::parsed::read_face_style(bytes) {
+        return FaceStyle {
+            weight: FcWeight::from_u16(weight),
+            italic,
+            oblique,
+            stretch: FcStretch::from_u16(width),
+            weight_axis: None,
+        };
+    }
     let Some(faces) = rust_fontconfig::FcParseFontBytes(bytes, family) else {
         return FaceStyle::default();
     };
